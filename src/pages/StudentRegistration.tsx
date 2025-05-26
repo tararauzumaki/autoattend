@@ -4,6 +4,7 @@ import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import { UserPlus, Camera, X, Upload, CheckCircle } from 'lucide-react';
+import * as faceapi from 'face-api.js';
 
 interface Student {
   id: string;
@@ -11,6 +12,7 @@ interface Student {
   student_id: string;
   course: string;
   photo_url: string;
+  descriptor: number[] | null;
   created_at: string;
 }
 
@@ -27,14 +29,31 @@ const StudentRegistration = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [isModelLoading, setIsModelLoading] = useState(true);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   useEffect(() => {
+    loadModels();
     fetchStudents();
   }, []);
+
+  const loadModels = async () => {
+    try {
+      setIsModelLoading(true);
+      await Promise.all([
+        faceapi.nets.faceRecognitionNet.loadFromUri('/models'),
+        faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+        faceapi.nets.ssdMobilenetv1.loadFromUri('/models')
+      ]);
+      setIsModelLoading(false);
+    } catch (error) {
+      console.error('Error loading face-api models:', error);
+      setError('Failed to load facial recognition models');
+    }
+  };
   
   const fetchStudents = async () => {
     try {
@@ -56,7 +75,6 @@ const StudentRegistration = () => {
     }
   };
   
-  // Handle webcam functionality
   const startWebcam = async () => {
     setIsUsingWebcam(true);
     try {
@@ -128,6 +146,24 @@ const StudentRegistration = () => {
     clearPhoto();
     setError(null);
   };
+
+  const computeFaceDescriptor = async (imageUrl: string): Promise<Float32Array | null> => {
+    try {
+      const img = await faceapi.fetchImage(imageUrl);
+      const detection = await faceapi.detectSingleFace(img)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!detection) {
+        throw new Error('No face detected in the image');
+      }
+
+      return detection.descriptor;
+    } catch (error) {
+      console.error('Error computing face descriptor:', error);
+      throw error;
+    }
+  };
   
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -136,6 +172,11 @@ const StudentRegistration = () => {
     
     if (!name || !studentId || !course || !photo) {
       setError('All fields are required, including student photo');
+      return;
+    }
+
+    if (isModelLoading) {
+      setError('Please wait for facial recognition models to load');
       return;
     }
     
@@ -147,7 +188,7 @@ const StudentRegistration = () => {
       const fileName = `${Date.now()}.${fileExt}`;
       const filePath = `students/${fileName}`;
       
-      const { error: uploadError } = await supabase.storage
+      const { error: uploadError, data: uploadData } = await supabase.storage
         .from('images')
         .upload(filePath, photo);
         
@@ -159,8 +200,14 @@ const StudentRegistration = () => {
       const { data: { publicUrl } } = supabase.storage
         .from('images')
         .getPublicUrl(filePath);
-      
-      // Create student record
+
+      // Compute face descriptor
+      const descriptor = await computeFaceDescriptor(publicUrl);
+      if (!descriptor) {
+        throw new Error('Failed to compute facial features. Please ensure the photo shows a clear face.');
+      }
+
+      // Create student record with descriptor
       const { error: insertError } = await supabase
         .from('students')
         .insert({
@@ -168,6 +215,7 @@ const StudentRegistration = () => {
           student_id: studentId,
           course,
           photo_url: publicUrl,
+          descriptor: Array.from(descriptor) // Convert Float32Array to regular array for storage
         });
         
       if (insertError) {
@@ -178,8 +226,15 @@ const StudentRegistration = () => {
       resetForm();
       fetchStudents();
     } catch (error: any) {
-      console.error('Error registering student:', error.message);
+      console.error('Error registering student:', error);
       setError('Failed to register student: ' + error.message);
+
+      // Clean up uploaded file if student creation fails
+      if (filePath) {
+        await supabase.storage
+          .from('images')
+          .remove([filePath]);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -200,6 +255,12 @@ const StudentRegistration = () => {
       
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-1" title="Register New Student">
+          {isModelLoading && (
+            <div className="mb-4 p-3 bg-blue-100 border border-blue-200 text-blue-700 rounded-md">
+              Loading facial recognition models...
+            </div>
+          )}
+
           {successMessage && (
             <div className="mb-4 p-3 bg-green-100 border border-green-200 text-green-700 rounded-md flex items-center">
               <CheckCircle size={16} className="mr-2" />
@@ -321,7 +382,7 @@ const StudentRegistration = () => {
                 type="submit" 
                 variant="primary" 
                 fullWidth 
-                disabled={isSaving}
+                disabled={isSaving || isModelLoading}
                 className="mt-4"
               >
                 <UserPlus size={16} className="mr-1" />
